@@ -37,17 +37,21 @@ import { createBackground } from '../lib/three-vignette.js';
 
 import {
   DynamicPathTracingSceneGenerator,
+  PathTracingSceneGenerator,
   PathTracingRenderer,
   PhysicalPathTracingMaterial,
+  BlurredEnvMapGenerator
   // @ts-ignore
 } from './index.module';
 
+// console.log(PathTracingSceneWorker);
+
 const params = {
-  environmentIntensity: 0,
+  environmentIntensity: 1,
   environmentRotation: 0,
   emissiveIntensity: 100,
-  bounces: 1,
-  samplesPerFrame: 2,
+  bounces: 3,
+  samplesPerFrame: 1,
   // resolutionScale: 1 / window.devicePixelRatio,
   resolutionScale: 0.2,
   filterGlossyFactor: 0.25,
@@ -208,9 +212,9 @@ export class Viewer {
     this.activeCamera.updateMatrixWorld();
 
     this.ptRenderer.material.filterGlossyFactor = params.filterGlossyFactor;
-    // this.ptRenderer.material.environmentIntensity = params.environmentIntensity;
-    this.ptRenderer.material.environmentBlur = 4;
-    this.ptRenderer.material.bounces = 20;
+    this.ptRenderer.material.environmentIntensity = params.environmentIntensity;
+    this.ptRenderer.material.environmentBlur = 0.35;
+    this.ptRenderer.material.bounces = 3;
     this.ptRenderer.update();
 
     // copy the current state of the path tracer to canvas to display
@@ -318,9 +322,9 @@ export class Viewer {
 
 
 
-        let generator = new DynamicPathTracingSceneGenerator(scene);
-
-        const result = generator.generate();
+        // let generator = new DynamicPathTracingSceneGenerator(scene);
+        let generator = new PathTracingSceneGenerator();
+        const result = generator.generate(scene);
         console.log(result)
 
         const { bvh, textures, materials } = result;
@@ -335,17 +339,22 @@ export class Viewer {
         material.textures.setTextures(renderer, 2048, 2048, textures);
         material.materials.updateFrom(materials, textures);
 
-        generator.dispose();
+        // generator.dispose();
 
 
 
-        // const texture = await new RGBELoader().loadAsync('assets/environment/venice_sunset_1k.hdr.hdr');
+        // const texture = await new RGBELoader().loadAsync('assets/environment/venice_sunset_1k.hdr');
         console.log('textureLoader');
         const textureLoader = new RGBELoader();
         textureLoader.load('assets/environment/venice_sunset_1k.hdr', (texture) => {
           console.log(this.ptRenderer.material)
-          this.ptRenderer.material.envMapInfo.updateFrom(texture);
-          
+          const generator = new BlurredEnvMapGenerator(renderer);
+          const blurredTex = generator.generate(texture, 0.35);
+          this.ptRenderer.material.envMapInfo.updateFrom(blurredTex);
+          this.ptRenderer.material.environmentIntensity = params.environmentIntensity;
+          this.ptRenderer.material.environmentBlur = 0.35;
+          this.ptRenderer.material.bounces = params.bounces;
+
           resolve(gltf);
         })
 
@@ -434,9 +443,9 @@ export class Viewer {
 
   printGraph(node) {
 
-    console.group(' <' + node.type + '> ' + node.name);
-    node.children.forEach((child) => this.printGraph(child));
-    console.groupEnd();
+    // console.group(' <' + node.type + '> ' + node.name);
+    // node.children.forEach((child) => this.printGraph(child));
+    // console.groupEnd();
 
   }
 
