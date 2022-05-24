@@ -18,6 +18,8 @@ import {
   Vector3,
   WebGLRenderer,
   sRGBEncoding,
+  MeshBasicMaterial,
+  ACESFilmicToneMapping
 } from 'three';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
@@ -26,18 +28,38 @@ import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 
 import { GUI } from 'dat.gui';
 
 import { environments } from '../assets/environment/index.js';
 import { createBackground } from '../lib/three-vignette.js';
 
+import {
+  DynamicPathTracingSceneGenerator,
+  PathTracingRenderer,
+  PhysicalPathTracingMaterial,
+  // @ts-ignore
+} from './index.module';
+
+const params = {
+  environmentIntensity: 0,
+  environmentRotation: 0,
+  emissiveIntensity: 100,
+  bounces: 1,
+  samplesPerFrame: 2,
+  // resolutionScale: 1 / window.devicePixelRatio,
+  resolutionScale: 0.2,
+  filterGlossyFactor: 0.25,
+  tiles: 2,
+};
+
 const DEFAULT_CAMERA = '[default]';
 
 const MANAGER = new LoadingManager();
 const THREE_PATH = `https://unpkg.com/three@0.${REVISION}.x`
-const DRACO_LOADER = new DRACOLoader( MANAGER ).setDecoderPath( `${THREE_PATH}/examples/js/libs/draco/gltf/` );
-const KTX2_LOADER = new KTX2Loader( MANAGER ).setTranscoderPath( `${THREE_PATH}/examples/js/libs/basis/` );
+const DRACO_LOADER = new DRACOLoader(MANAGER).setDecoderPath(`${THREE_PATH}/examples/js/libs/draco/gltf/`);
+const KTX2_LOADER = new KTX2Loader(MANAGER).setTranscoderPath(`${THREE_PATH}/examples/js/libs/basis/`);
 
 const IS_IOS = isIOS();
 
@@ -54,13 +76,13 @@ const MAP_NAMES = [
   'specularMap',
 ];
 
-const Preset = {ASSET_GENERATOR: 'assetgenerator'};
+const Preset = { ASSET_GENERATOR: 'assetgenerator' };
 
 Cache.enabled = true;
 
 export class Viewer {
 
-  constructor (el, options) {
+  constructor(el, options) {
     this.el = el;
     this.options = options;
 
@@ -105,24 +127,51 @@ export class Viewer {
     const fov = options.preset === Preset.ASSET_GENERATOR
       ? 0.8 * 180 / Math.PI
       : 60;
-    this.defaultCamera = new PerspectiveCamera( fov, el.clientWidth / el.clientHeight, 0.01, 1000 );
+    this.defaultCamera = new PerspectiveCamera(fov, el.clientWidth / el.clientHeight, 0.01, 1000);
     this.activeCamera = this.defaultCamera;
-    this.scene.add( this.defaultCamera );
+    this.scene.add(this.defaultCamera);
 
-    this.renderer = window.renderer = new WebGLRenderer({antialias: true});
+    this.renderer = window.renderer = new WebGLRenderer({ antialias: true });
     this.renderer.physicallyCorrectLights = true;
     this.renderer.outputEncoding = sRGBEncoding;
-    this.renderer.setClearColor( 0xcccccc );
-    this.renderer.setPixelRatio( window.devicePixelRatio );
-    this.renderer.setSize( el.clientWidth, el.clientHeight );
+    this.renderer.toneMapping = ACESFilmicToneMapping;
+    this.renderer.setClearColor(0xcccccc);
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setSize(el.clientWidth, el.clientHeight);
 
-    this.pmremGenerator = new PMREMGenerator( this.renderer );
+    /// CUSTOM
+
+    this.ptRenderer = new PathTracingRenderer(renderer);
+    this.ptRenderer.setSize(window.innerWidth, window.innerHeight);
+    this.ptRenderer.camera = this.activeCamera;
+    this.ptRenderer.material = new PhysicalPathTracingMaterial();
+
+    this.ptRenderer.material.setDefine('FEATURE_MIS', 0);
+    this.ptRenderer.tiles.set(params.tiles, params.tiles);
+
+    this.fsQuad = new FullScreenQuad(new MeshBasicMaterial({
+      map: this.ptRenderer.target.texture,
+
+      // if rendering transparent background
+      // blending: THREE.CustomBlending,
+    }));
+
+
+    /// CUSTOM END
+
+    this.pmremGenerator = new PMREMGenerator(this.renderer);
     this.pmremGenerator.compileEquirectangularShader();
 
-    this.controls = new OrbitControls( this.defaultCamera, this.renderer.domElement );
+    this.controls = new OrbitControls(this.defaultCamera, this.renderer.domElement);
     this.controls.autoRotate = false;
     this.controls.autoRotateSpeed = -10;
     this.controls.screenSpacePanning = true;
+
+    this.controls.addEventListener('change', () => {
+
+      this.ptRenderer.reset();
+
+    });
 
     this.vignette = createBackground({
       aspect: this.defaultCamera.aspect,
@@ -149,50 +198,65 @@ export class Viewer {
     if (options.kiosk) this.gui.close();
 
     this.animate = this.animate.bind(this);
-    requestAnimationFrame( this.animate );
+    requestAnimationFrame(this.animate);
     window.addEventListener('resize', this.resize.bind(this), false);
   }
 
-  animate (time) {
+  animate(time) {
 
-    requestAnimationFrame( this.animate );
+    requestAnimationFrame(this.animate);
+    this.activeCamera.updateMatrixWorld();
+
+    this.ptRenderer.material.filterGlossyFactor = params.filterGlossyFactor;
+    // this.ptRenderer.material.environmentIntensity = params.environmentIntensity;
+    this.ptRenderer.material.environmentBlur = 4;
+    this.ptRenderer.material.bounces = 20;
+    this.ptRenderer.update();
+
+    // copy the current state of the path tracer to canvas to display
+    renderer.autoClear = false;
+    // @ts-ignore
+    this.fsQuad.material.map = this.ptRenderer.target.texture;
+    this.fsQuad.render(renderer);
+    renderer.autoClear = true;
 
     const dt = (time - this.prevTime) / 1000;
 
     this.controls.update();
     this.stats.update();
     this.mixer && this.mixer.update(dt);
-    this.render();
+    // this.render();
 
     this.prevTime = time;
 
   }
 
-  render () {
+  render() {
 
-    this.renderer.render( this.scene, this.activeCamera );
+    this.renderer.render(this.scene, this.activeCamera);
     if (this.state.grid) {
       this.axesCamera.position.copy(this.defaultCamera.position)
       this.axesCamera.lookAt(this.axesScene.position)
-      this.axesRenderer.render( this.axesScene, this.axesCamera );
+      this.axesRenderer.render(this.axesScene, this.axesCamera);
     }
   }
 
-  resize () {
+  resize() {
 
-    const {clientHeight, clientWidth} = this.el.parentElement;
+    const { clientHeight, clientWidth } = this.el.parentElement;
 
     this.defaultCamera.aspect = clientWidth / clientHeight;
     this.defaultCamera.updateProjectionMatrix();
-    this.vignette.style({aspect: this.defaultCamera.aspect});
+    this.vignette.style({ aspect: this.defaultCamera.aspect });
     this.renderer.setSize(clientWidth, clientHeight);
 
     this.axesCamera.aspect = this.axesDiv.clientWidth / this.axesDiv.clientHeight;
     this.axesCamera.updateProjectionMatrix();
     this.axesRenderer.setSize(this.axesDiv.clientWidth, this.axesDiv.clientHeight);
+    this.ptRenderer.reset();
   }
 
-  load ( url, rootPath, assetMap ) {
+  load(url, rootPath, assetMap) {
 
     const baseURL = LoaderUtils.extractUrlBase(url);
 
@@ -220,11 +284,11 @@ export class Viewer {
 
       });
 
-      const loader = new GLTFLoader( MANAGER )
+      const loader = new GLTFLoader(MANAGER)
         .setCrossOrigin('anonymous')
-        .setDRACOLoader( DRACO_LOADER )
-        .setKTX2Loader( KTX2_LOADER.detectSupport( this.renderer ) )
-        .setMeshoptDecoder( MeshoptDecoder );
+        .setDRACOLoader(DRACO_LOADER)
+        .setKTX2Loader(KTX2_LOADER.detectSupport(this.renderer))
+        .setMeshoptDecoder(MeshoptDecoder);
 
       const blobURLs = [];
 
@@ -232,6 +296,8 @@ export class Viewer {
 
         const scene = gltf.scene || gltf.scenes[0];
         const clips = gltf.animations || [];
+
+        scene.scale.set(0.1, 0.1, 0.1);
 
         if (!scene) {
           // Valid, but not supported by this viewer.
@@ -243,12 +309,46 @@ export class Viewer {
 
         this.setContent(scene, clips);
 
+        scene.updateMatrixWorld();
+
         blobURLs.forEach(URL.revokeObjectURL);
 
         // See: https://github.com/google/draco/issues/349
         // DRACOLoader.releaseDecoderModule();
 
-        resolve(gltf);
+
+
+        let generator = new DynamicPathTracingSceneGenerator(scene);
+
+        const result = generator.generate();
+        console.log(result)
+
+        const { bvh, textures, materials } = result;
+        const geometry = bvh.geometry;
+        const material = this.ptRenderer.material;
+
+        material.bvh.updateFrom(bvh);
+        material.normalAttribute.updateFrom(geometry.attributes.normal);
+        material.tangentAttribute.updateFrom(geometry.attributes.tangent);
+        material.uvAttribute.updateFrom(geometry.attributes.uv);
+        material.materialIndexAttribute.updateFrom(geometry.attributes.materialIndex);
+        material.textures.setTextures(renderer, 2048, 2048, textures);
+        material.materials.updateFrom(materials, textures);
+
+        generator.dispose();
+
+
+
+        // const texture = await new RGBELoader().loadAsync('assets/environment/venice_sunset_1k.hdr.hdr');
+        console.log('textureLoader');
+        const textureLoader = new RGBELoader();
+        textureLoader.load('assets/environment/venice_sunset_1k.hdr', (texture) => {
+          console.log(this.ptRenderer.material)
+          this.ptRenderer.material.envMapInfo.updateFrom(texture);
+          
+          resolve(gltf);
+        })
+
 
       }, undefined, reject);
 
@@ -260,7 +360,7 @@ export class Viewer {
    * @param {THREE.Object3D} object
    * @param {Array<THREE.AnimationClip} clips
    */
-  setContent ( object, clips ) {
+  setContent(object, clips) {
 
     this.clear();
 
@@ -280,8 +380,8 @@ export class Viewer {
 
     if (this.options.cameraPosition) {
 
-      this.defaultCamera.position.fromArray( this.options.cameraPosition );
-      this.defaultCamera.lookAt( new Vector3() );
+      this.defaultCamera.position.fromArray(this.options.cameraPosition);
+      this.defaultCamera.lookAt(new Vector3());
 
     } else {
 
@@ -332,7 +432,7 @@ export class Viewer {
 
   }
 
-  printGraph (node) {
+  printGraph(node) {
 
     console.group(' <' + node.type + '> ' + node.name);
     node.children.forEach((child) => this.printGraph(child));
@@ -343,7 +443,7 @@ export class Viewer {
   /**
    * @param {Array<THREE.AnimationClip} clips
    */
-  setClips ( clips ) {
+  setClips(clips) {
     if (this.mixer) {
       this.mixer.stopAllAction();
       this.mixer.uncacheRoot(this.mixer.getRoot());
@@ -353,10 +453,10 @@ export class Viewer {
     this.clips = clips;
     if (!clips.length) return;
 
-    this.mixer = new AnimationMixer( this.content );
+    this.mixer = new AnimationMixer(this.content);
   }
 
-  playAllClips () {
+  playAllClips() {
     this.clips.forEach((clip) => {
       this.mixer.clipAction(clip).reset().play();
       this.state.actionStates[clip.name] = true;
@@ -366,7 +466,7 @@ export class Viewer {
   /**
    * @param {string} name
    */
-  setCamera ( name ) {
+  setCamera(name) {
     if (name === DEFAULT_CAMERA) {
       this.controls.enabled = true;
       this.activeCamera = this.defaultCamera;
@@ -380,7 +480,7 @@ export class Viewer {
     }
   }
 
-  updateTextureEncoding () {
+  updateTextureEncoding() {
     const encoding = this.state.textureEncoding === 'sRGB'
       ? sRGBEncoding
       : LinearEncoding;
@@ -391,7 +491,7 @@ export class Viewer {
     });
   }
 
-  updateLights () {
+  updateLights() {
     const state = this.state;
     const lights = this.lights;
 
@@ -411,7 +511,7 @@ export class Viewer {
     }
   }
 
-  addLights () {
+  addLights() {
     const state = this.state;
 
     if (this.options.preset === Preset.ASSET_GENERATOR) {
@@ -422,35 +522,35 @@ export class Viewer {
       return;
     }
 
-    const light1  = new AmbientLight(state.ambientColor, state.ambientIntensity);
+    const light1 = new AmbientLight(state.ambientColor, state.ambientIntensity);
     light1.name = 'ambient_light';
-    this.defaultCamera.add( light1 );
+    this.defaultCamera.add(light1);
 
-    const light2  = new DirectionalLight(state.directColor, state.directIntensity);
+    const light2 = new DirectionalLight(state.directColor, state.directIntensity);
     light2.position.set(0.5, 0, 0.866); // ~60º
     light2.name = 'main_light';
-    this.defaultCamera.add( light2 );
+    this.defaultCamera.add(light2);
 
     this.lights.push(light1, light2);
   }
 
-  removeLights () {
+  removeLights() {
 
     this.lights.forEach((light) => light.parent.remove(light));
     this.lights.length = 0;
 
   }
 
-  updateEnvironment () {
+  updateEnvironment() {
 
     const environment = environments.filter((entry) => entry.name === this.state.environment)[0];
 
-    this.getCubeMapTexture( environment ).then(( { envMap } ) => {
+    this.getCubeMapTexture(environment).then(({ envMap }) => {
 
       if ((!envMap || !this.state.background) && this.activeCamera === this.defaultCamera) {
-        this.scene.add(this.vignette);
+        // this.scene.add(this.vignette);
       } else {
-        this.scene.remove(this.vignette);
+        // this.scene.remove(this.vignette);
       }
 
       this.scene.environment = envMap;
@@ -460,29 +560,29 @@ export class Viewer {
 
   }
 
-  getCubeMapTexture ( environment ) {
+  getCubeMapTexture(environment) {
     const { path } = environment;
 
     // no envmap
-    if ( ! path ) return Promise.resolve( { envMap: null } );
+    if (!path) return Promise.resolve({ envMap: null });
 
-    return new Promise( ( resolve, reject ) => {
+    return new Promise((resolve, reject) => {
 
       new RGBELoader()
-        .load( path, ( texture ) => {
+        .load(path, (texture) => {
 
-          const envMap = this.pmremGenerator.fromEquirectangular( texture ).texture;
+          const envMap = this.pmremGenerator.fromEquirectangular(texture).texture;
           this.pmremGenerator.dispose();
 
-          resolve( { envMap } );
+          resolve({ envMap });
 
-        }, undefined, reject );
+        }, undefined, reject);
 
     });
 
   }
 
-  updateDisplay () {
+  updateDisplay() {
     if (this.skeletonHelpers.length) {
       this.skeletonHelpers.forEach((helper) => this.scene.remove(helper));
     }
@@ -518,8 +618,8 @@ export class Viewer {
     }
   }
 
-  updateBackground () {
-    this.vignette.style({colors: [this.state.bgColor1, this.state.bgColor2]});
+  updateBackground() {
+    // this.vignette.style({ colors: [this.state.bgColor1, this.state.bgColor2] });
   }
 
   /**
@@ -527,31 +627,31 @@ export class Viewer {
    *
    * See: https://stackoverflow.com/q/16226693/1314762
    */
-  addAxesHelper () {
+  addAxesHelper() {
     this.axesDiv = document.createElement('div');
-    this.el.appendChild( this.axesDiv );
+    this.el.appendChild(this.axesDiv);
     this.axesDiv.classList.add('axes');
 
-    const {clientWidth, clientHeight} = this.axesDiv;
+    const { clientWidth, clientHeight } = this.axesDiv;
 
     this.axesScene = new Scene();
-    this.axesCamera = new PerspectiveCamera( 50, clientWidth / clientHeight, 0.1, 10 );
-    this.axesScene.add( this.axesCamera );
+    this.axesCamera = new PerspectiveCamera(50, clientWidth / clientHeight, 0.1, 10);
+    this.axesScene.add(this.axesCamera);
 
-    this.axesRenderer = new WebGLRenderer( { alpha: true } );
-    this.axesRenderer.setPixelRatio( window.devicePixelRatio );
-    this.axesRenderer.setSize( this.axesDiv.clientWidth, this.axesDiv.clientHeight );
+    this.axesRenderer = new WebGLRenderer({ alpha: true });
+    this.axesRenderer.setPixelRatio(window.devicePixelRatio);
+    this.axesRenderer.setSize(this.axesDiv.clientWidth, this.axesDiv.clientHeight);
 
     this.axesCamera.up = this.defaultCamera.up;
 
     this.axesCorner = new AxesHelper(5);
-    this.axesScene.add( this.axesCorner );
+    this.axesScene.add(this.axesCorner);
     this.axesDiv.appendChild(this.axesRenderer.domElement);
   }
 
-  addGUI () {
+  addGUI() {
 
-    const gui = this.gui = new GUI({autoPlace: false, width: 260, hideable: true});
+    const gui = this.gui = new GUI({ autoPlace: false, width: 260, hideable: true });
 
     // Display controls.
     const dispFolder = gui.addFolder('Display');
@@ -574,7 +674,7 @@ export class Viewer {
     const lightFolder = gui.addFolder('Lighting');
     const encodingCtrl = lightFolder.add(this.state, 'textureEncoding', ['sRGB', 'Linear']);
     encodingCtrl.onChange(() => this.updateTextureEncoding());
-    lightFolder.add(this.renderer, 'outputEncoding', {sRGB: sRGBEncoding, Linear: LinearEncoding})
+    lightFolder.add(this.renderer, 'outputEncoding', { sRGB: sRGBEncoding, Linear: LinearEncoding })
       .onChange(() => {
         this.renderer.outputEncoding = Number(this.renderer.outputEncoding);
         traverseMaterials(this.content, (material) => {
@@ -599,7 +699,7 @@ export class Viewer {
     playbackSpeedCtrl.onChange((speed) => {
       if (this.mixer) this.mixer.timeScale = speed;
     });
-    this.animFolder.add({playAll: () => this.playAllClips()}, 'playAll');
+    this.animFolder.add({ playAll: () => this.playAllClips() }, 'playAll');
 
     // Morph target controls.
     this.morphFolder = gui.addFolder('Morph Targets');
@@ -615,17 +715,17 @@ export class Viewer {
     this.stats.dom.style.position = 'static';
     perfLi.appendChild(this.stats.dom);
     perfLi.classList.add('gui-stats');
-    perfFolder.__ul.appendChild( perfLi );
+    perfFolder.__ul.appendChild(perfLi);
 
     const guiWrap = document.createElement('div');
-    this.el.appendChild( guiWrap );
+    this.el.appendChild(guiWrap);
     guiWrap.classList.add('gui-wrap');
     guiWrap.appendChild(gui.domElement);
     gui.open();
 
   }
 
-  updateGUI () {
+  updateGUI() {
     this.cameraFolder.domElement.style.display = 'none';
 
     this.morphCtrls.forEach((ctrl) => ctrl.remove());
@@ -660,7 +760,7 @@ export class Viewer {
       this.morphFolder.domElement.style.display = '';
       morphMeshes.forEach((mesh) => {
         if (mesh.morphTargetInfluences.length) {
-          const nameCtrl = this.morphFolder.add({name: mesh.name || 'Untitled'}, 'name');
+          const nameCtrl = this.morphFolder.add({ name: mesh.name || 'Untitled' }, 'name');
           this.morphCtrls.push(nameCtrl);
         }
         for (let i = 0; i < mesh.morphTargetInfluences.length; i++) {
@@ -701,37 +801,37 @@ export class Viewer {
     }
   }
 
-  clear () {
+  clear() {
 
-    if ( !this.content ) return;
+    if (!this.content) return;
 
-    this.scene.remove( this.content );
+    this.scene.remove(this.content);
 
     // dispose geometry
     this.content.traverse((node) => {
 
-      if ( !node.isMesh ) return;
+      if (!node.isMesh) return;
 
       node.geometry.dispose();
 
-    } );
+    });
 
     // dispose textures
-    traverseMaterials( this.content, (material) => {
+    traverseMaterials(this.content, (material) => {
 
-      MAP_NAMES.forEach( (map) => {
+      MAP_NAMES.forEach((map) => {
 
-        if (material[ map ]) material[ map ].dispose();
+        if (material[map]) material[map].dispose();
 
-      } );
+      });
 
-    } );
+    });
 
   }
 
 };
 
-function traverseMaterials (object, callback) {
+function traverseMaterials(object, callback) {
   object.traverse((node) => {
     if (!node.isMesh) return;
     const materials = Array.isArray(node.material)
@@ -751,6 +851,6 @@ function isIOS() {
     'iPhone',
     'iPod'
   ].includes(navigator.platform)
-  // iPad on iOS 13 detection
-  || (navigator.userAgent.includes('Mac') && 'ontouchend' in document);
+    // iPad on iOS 13 detection
+    || (navigator.userAgent.includes('Mac') && 'ontouchend' in document);
 }

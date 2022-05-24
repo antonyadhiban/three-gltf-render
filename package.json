@@ -34,7 +34,9 @@
     "handlebars": "^4.7.6",
     "query-string": "^7.1.1",
     "simple-dropzone": "^0.8.1",
-    "three": "^0.139.2"
+    "src": "^1.1.2",
+    "three": "^0.139.2",
+    "three-mesh-bvh": "^0.5.11"
   },
   "devDependencies": {
     "glslify-bundle": "^5.1.1",
